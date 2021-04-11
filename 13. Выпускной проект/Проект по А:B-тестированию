@@ -1,0 +1,4779 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Проект по А/B-тестированию"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Постановка задачи**\n",
+    "\n",
+    "Ваша задача — провести оценку результатов A/B-теста. В вашем распоряжении есть датасет с действиями пользователей, техническое задание и несколько вспомогательных датасетов.\n",
+    " - Оцените корректность проведения теста\n",
+    " - Проанализируйте результаты теста\n",
+    " \n",
+    "Чтобы оценить корректность проведения теста, проверьте:\n",
+    " - пересечение тестовой аудитории с конкурирующим тестом,\n",
+    " - совпадение теста и маркетинговых событий, другие проблемы временных границ теста."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Техническое задание**\n",
+    "- Название теста: recommender_system_test;\n",
+    "- Группы: А (контрольная), B (новая платёжная воронка);\n",
+    "- Дата запуска: 2020-12-07;\n",
+    "- Дата остановки набора новых пользователей: 2020-12-21;\n",
+    "- Дата остановки: 2021-01-04;\n",
+    "- Аудитория: 15% новых пользователей из региона EU;\n",
+    "- Назначение теста: тестирование изменений, связанных с внедрением улучшенной рекомендательной системы;\n",
+    "- Ожидаемое количество участников теста: 6000.\n",
+    "- Ожидаемый эффект: за 14 дней с момента регистрации в системе пользователи покажут улучшение каждой метрики не менее, чем на 10%:\n",
+    " - конверсии в просмотр карточек товаров — событие product_page\n",
+    " - просмотры корзины — product_card\n",
+    " - покупки — purchase."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`ab_project_marketing_events.csv` — календарь маркетинговых событий на 2020 год.\n",
+    "\n",
+    "Структура файла:\n",
+    "- `name` — название маркетингового события;\n",
+    "- `regions` — регионы, в которых будет проводиться рекламная кампания;\n",
+    "- `start_dt` — дата начала кампании;\n",
+    "- `finish_dt` — дата завершения кампании."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`final_ab_new_users.csv` — пользователи, зарегистрировавшиеся с 7 по 21 декабря 2020 года.\n",
+    "\n",
+    "Структура файла:\n",
+    "- `user_id` — идентификатор пользователя;\n",
+    "- `first_date` — дата регистрации;\n",
+    "- `region` — регион пользователя;\n",
+    "- `device` — устройство, с которого происходила регистрация."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`final_ab_events.csv` — действия новых пользователей в период с 7 декабря 2020 по 4 января 2021 года.\n",
+    "\n",
+    "Структура файла:\n",
+    "- `user_id` — идентификатор пользователя;\n",
+    "- `event_dt` — дата и время покупки;\n",
+    "- `event_name` — тип события;\n",
+    "- `details` — дополнительные данные о событии. Например, для покупок, `purchase,` в этом поле хранится стоимость покупки в долларах."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "`final_ab_participants.csv` — таблица участников тестов.\n",
+    "\n",
+    "Структура файла:\n",
+    "- `user_id` — идентификатор пользователя;\n",
+    "- `ab_test` — название теста;\n",
+    "- `group` — группа пользователя."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Загрузка данных"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import pandas as pd\n",
+    "import plotly.express as px\n",
+    "from plotly import graph_objects as go\n",
+    "import matplotlib.pyplot as plt\n",
+    "import numpy as np\n",
+    "import math\n",
+    "from scipy import stats as st"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "marketing_events=pd.read_csv('/datasets/ab_project_marketing_events.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "<class 'pandas.core.frame.DataFrame'>\n",
+      "RangeIndex: 14 entries, 0 to 13\n",
+      "Data columns (total 4 columns):\n",
+      "name         14 non-null object\n",
+      "regions      14 non-null object\n",
+      "start_dt     14 non-null object\n",
+      "finish_dt    14 non-null object\n",
+      "dtypes: object(4)\n",
+      "memory usage: 576.0+ bytes\n"
+     ]
+    }
+   ],
+   "source": [
+    "marketing_events.info()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "new_users=pd.read_csv('/datasets/final_ab_new_users.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "<class 'pandas.core.frame.DataFrame'>\n",
+      "RangeIndex: 61733 entries, 0 to 61732\n",
+      "Data columns (total 4 columns):\n",
+      "user_id       61733 non-null object\n",
+      "first_date    61733 non-null object\n",
+      "region        61733 non-null object\n",
+      "device        61733 non-null object\n",
+      "dtypes: object(4)\n",
+      "memory usage: 1.9+ MB\n"
+     ]
+    }
+   ],
+   "source": [
+    "new_users.info()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "events=pd.read_csv('/datasets/final_ab_events.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>user_id</th>\n",
+       "      <th>event_dt</th>\n",
+       "      <th>event_name</th>\n",
+       "      <th>details</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>E1BDDCE0DAFA2679</td>\n",
+       "      <td>2020-12-07 20:22:03</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>99.99</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>7B6452F081F49504</td>\n",
+       "      <td>2020-12-07 09:22:53</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>9.99</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>9CD9F34546DF254C</td>\n",
+       "      <td>2020-12-07 12:59:29</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>4.99</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>96F27A054B191457</td>\n",
+       "      <td>2020-12-07 04:02:40</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>4.99</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>4</td>\n",
+       "      <td>1FD7660FDF94CA1F</td>\n",
+       "      <td>2020-12-07 10:15:09</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>4.99</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "            user_id             event_dt event_name  details\n",
+       "0  E1BDDCE0DAFA2679  2020-12-07 20:22:03   purchase    99.99\n",
+       "1  7B6452F081F49504  2020-12-07 09:22:53   purchase     9.99\n",
+       "2  9CD9F34546DF254C  2020-12-07 12:59:29   purchase     4.99\n",
+       "3  96F27A054B191457  2020-12-07 04:02:40   purchase     4.99\n",
+       "4  1FD7660FDF94CA1F  2020-12-07 10:15:09   purchase     4.99"
+      ]
+     },
+     "execution_count": 7,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "events.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "participants=pd.read_csv('/datasets/final_ab_participants.csv')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>user_id</th>\n",
+       "      <th>group</th>\n",
+       "      <th>ab_test</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>D1ABA3E2887B6A73</td>\n",
+       "      <td>A</td>\n",
+       "      <td>recommender_system_test</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>A7A3664BD6242119</td>\n",
+       "      <td>A</td>\n",
+       "      <td>recommender_system_test</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>DABC14FDDFADD29E</td>\n",
+       "      <td>A</td>\n",
+       "      <td>recommender_system_test</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>04988C5DF189632E</td>\n",
+       "      <td>A</td>\n",
+       "      <td>recommender_system_test</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>4</td>\n",
+       "      <td>482F14783456D21B</td>\n",
+       "      <td>B</td>\n",
+       "      <td>recommender_system_test</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "            user_id group                  ab_test\n",
+       "0  D1ABA3E2887B6A73     A  recommender_system_test\n",
+       "1  A7A3664BD6242119     A  recommender_system_test\n",
+       "2  DABC14FDDFADD29E     A  recommender_system_test\n",
+       "3  04988C5DF189632E     A  recommender_system_test\n",
+       "4  482F14783456D21B     B  recommender_system_test"
+      ]
+     },
+     "execution_count": 9,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "participants.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Необходимо поменять тип данных во всех столбцах с датами и можно заменить название столбца details на purchase таблицы events."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Предобработка данных"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Поменяем тип данных у столбцов указывающих дату**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "<class 'pandas.core.frame.DataFrame'>\n",
+      "RangeIndex: 14 entries, 0 to 13\n",
+      "Data columns (total 4 columns):\n",
+      "name         14 non-null object\n",
+      "regions      14 non-null object\n",
+      "start_dt     14 non-null datetime64[ns]\n",
+      "finish_dt    14 non-null datetime64[ns]\n",
+      "dtypes: datetime64[ns](2), object(2)\n",
+      "memory usage: 576.0+ bytes\n"
+     ]
+    }
+   ],
+   "source": [
+    "marketing_events['start_dt']=pd.to_datetime(marketing_events['start_dt'])\n",
+    "marketing_events['finish_dt']=pd.to_datetime(marketing_events['finish_dt'])\n",
+    "marketing_events.info()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "new_users['first_date']=pd.to_datetime(new_users['first_date'])\n",
+    "events['event_dt']=pd.to_datetime(events['event_dt'])\n",
+    "events['date']=events['event_dt'].dt.strftime('%Y-%m-%d')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "events = events.rename(columns={'details': 'purchase'})"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Поиск пропусков и дубликатов**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "name         0\n",
+       "regions      0\n",
+       "start_dt     0\n",
+       "finish_dt    0\n",
+       "dtype: int64"
+      ]
+     },
+     "execution_count": 13,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "marketing_events.isnull().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0"
+      ]
+     },
+     "execution_count": 14,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "marketing_events.duplicated().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "user_id       0\n",
+       "first_date    0\n",
+       "region        0\n",
+       "device        0\n",
+       "dtype: int64"
+      ]
+     },
+     "execution_count": 15,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "new_users.isnull().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0"
+      ]
+     },
+     "execution_count": 16,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "new_users.duplicated().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "user_id            0\n",
+       "event_dt           0\n",
+       "event_name         0\n",
+       "purchase      377577\n",
+       "date               0\n",
+       "dtype: int64"
+      ]
+     },
+     "execution_count": 17,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "events.isnull().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 18,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0"
+      ]
+     },
+     "execution_count": 18,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "events.duplicated().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 19,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "user_id    0\n",
+       "group      0\n",
+       "ab_test    0\n",
+       "dtype: int64"
+      ]
+     },
+     "execution_count": 19,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "participants.isnull().sum()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 20,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0"
+      ]
+     },
+     "execution_count": 20,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "participants.duplicated().sum()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Заменим все пропуски в events на 0,** так как покупка не могла стоить 0,значит 0 будет означать неполную информацию"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "user_id       0\n",
+       "event_dt      0\n",
+       "event_name    0\n",
+       "purchase      0\n",
+       "date          0\n",
+       "dtype: int64"
+      ]
+     },
+     "execution_count": 21,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "events=events.fillna(0)\n",
+    "events.isnull().sum()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Исследовательский анализ данных"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Какие особенности данных нужно учесть, прежде чем приступать к A/B-тестированию?"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Время проведения теста**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "count                   61733\n",
+       "unique                     17\n",
+       "top       2020-12-21 00:00:00\n",
+       "freq                     6290\n",
+       "first     2020-12-07 00:00:00\n",
+       "last      2020-12-23 00:00:00\n",
+       "Name: first_date, dtype: object"
+      ]
+     },
+     "execution_count": 22,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "new_users['first_date'].describe()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Можно заметить, что по заданию сказано, что набор новых пользователей закончился 21.12, хотя в таблице есть участники зарегистрировавшиеся 23.12, изменим данные по пользовталем, заменив на тех, кто зарегистрировался только до конца регистрации"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "new_users=new_users.query('first_date<=\"2020-12-21\"')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "count                  440317\n",
+       "unique                 267268\n",
+       "top       2020-12-23 02:37:24\n",
+       "freq                       10\n",
+       "first     2020-12-07 00:00:33\n",
+       "last      2020-12-30 23:36:33\n",
+       "Name: event_dt, dtype: object"
+      ]
+     },
+     "execution_count": 24,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "events['event_dt'].describe()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "А в событиях новых пользователей не хватает действий с 31.12 по 04.01, хотя по заданию они должны быть"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "count                      14\n",
+       "unique                     14\n",
+       "top       2020-02-14 00:00:00\n",
+       "freq                        1\n",
+       "first     2020-01-25 00:00:00\n",
+       "last      2020-12-30 00:00:00\n",
+       "Name: start_dt, dtype: object"
+      ]
+     },
+     "execution_count": 25,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "marketing_events['start_dt'].describe()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "count                      14\n",
+       "unique                     14\n",
+       "top       2020-05-11 00:00:00\n",
+       "freq                        1\n",
+       "first     2020-02-07 00:00:00\n",
+       "last      2021-01-07 00:00:00\n",
+       "Name: finish_dt, dtype: object"
+      ]
+     },
+     "execution_count": 26,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "marketing_events['finish_dt'].describe()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Проверим попали ли какие-нибудь маркетинговые события в период проведения аб-теста"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 27,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>name</th>\n",
+       "      <th>regions</th>\n",
+       "      <th>start_dt</th>\n",
+       "      <th>finish_dt</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>Christmas&amp;New Year Promo</td>\n",
+       "      <td>EU, N.America</td>\n",
+       "      <td>2020-12-25</td>\n",
+       "      <td>2021-01-03</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>10</td>\n",
+       "      <td>CIS New Year Gift Lottery</td>\n",
+       "      <td>CIS</td>\n",
+       "      <td>2020-12-30</td>\n",
+       "      <td>2021-01-07</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                         name        regions   start_dt  finish_dt\n",
+       "0    Christmas&New Year Promo  EU, N.America 2020-12-25 2021-01-03\n",
+       "10  CIS New Year Gift Lottery            CIS 2020-12-30 2021-01-07"
+      ]
+     },
+     "execution_count": 27,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "marketing_events.query('start_dt < \"2021-01-04\" and finish_dt > \"2020-12-07\"')"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### В выборках встречаются одни и те же пользователи?"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Аудиторию теста. Удостоверимся, что нет пересечений с конкурирующим тестом. Проверим равномерность распределения по тестовым группам и правильность их формирования**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "16666"
+      ]
+     },
+     "execution_count": 28,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "participants['user_id'].nunique()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 29,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "6701"
+      ]
+     },
+     "execution_count": 29,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "participants[participants['ab_test']=='recommender_system_test']['user_id'].nunique()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 30,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "11567"
+      ]
+     },
+     "execution_count": 30,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "participants[participants['ab_test']=='interface_eu_test']['user_id'].nunique()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Так как сумма уникальных пользователей двух тестов больше, чем количество уникальных пользователей таблицы => можно сделать вывод, что они точно пересекаются"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 31,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "ab_users=participants[participants['ab_test']=='recommender_system_test']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 32,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "interface_users=participants[participants['ab_test']=='interface_eu_test']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 33,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "new_parti=pd.merge(ab_users,interface_users,on='user_id',how='left')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 34,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "participants = new_parti.query('ab_test_y != \"interface_eu_test\"')\n",
+    "participants = participants[['user_id', 'group_x', 'ab_test_x']]"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Получилось 5099 пользователей, а должно быть 6000 "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 35,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "participants = participants[['user_id', 'group_x']]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 36,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "df_ext = events.merge(new_users, on = 'user_id', how = 'left')\n",
+    "df = df_ext.merge(participants, on = 'user_id')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 37,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "2788"
+      ]
+     },
+     "execution_count": 37,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "df['user_id'].nunique()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Количество пользователей группы А"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 38,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "2082"
+      ]
+     },
+     "execution_count": 38,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "len(df[df['group_x']=='A']['user_id'].unique())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Количество пользователей группы В"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 39,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "706"
+      ]
+     },
+     "execution_count": 39,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "len(df[df['group_x']=='B']['user_id'].unique())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Группы пользователей А и В не пересекаются"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Проверка для аудитории на 15% из EU"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 93,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>region</th>\n",
+       "      <th>all_users</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>APAC</td>\n",
+       "      <td>2883</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>CIS</td>\n",
+       "      <td>2900</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>EU</td>\n",
+       "      <td>42340</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>N.America</td>\n",
+       "      <td>8347</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "      region  all_users\n",
+       "0       APAC       2883\n",
+       "1        CIS       2900\n",
+       "2         EU      42340\n",
+       "3  N.America       8347"
+      ]
+     },
+     "execution_count": 93,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "all_region_users=new_users.groupby('region').agg({'user_id': 'count'}).reset_index()\n",
+    "all_region_users=all_region_users.rename(columns={'user_id':'all_users'})\n",
+    "all_region_users"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 94,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>region</th>\n",
+       "      <th>user_id</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>APAC</td>\n",
+       "      <td>45</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>CIS</td>\n",
+       "      <td>30</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>EU</td>\n",
+       "      <td>2594</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>N.America</td>\n",
+       "      <td>119</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "      region  user_id\n",
+       "0       APAC       45\n",
+       "1        CIS       30\n",
+       "2         EU     2594\n",
+       "3  N.America      119"
+      ]
+     },
+     "execution_count": 94,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "region_users = df.drop_duplicates('user_id').groupby('region').agg({'user_id': 'count'}).reset_index()\n",
+    "region_users"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 95,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>region</th>\n",
+       "      <th>user_id</th>\n",
+       "      <th>all_users</th>\n",
+       "      <th>percent</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>APAC</td>\n",
+       "      <td>45</td>\n",
+       "      <td>2883</td>\n",
+       "      <td>1.560874</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>CIS</td>\n",
+       "      <td>30</td>\n",
+       "      <td>2900</td>\n",
+       "      <td>1.034483</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>EU</td>\n",
+       "      <td>2594</td>\n",
+       "      <td>42340</td>\n",
+       "      <td>6.126594</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>N.America</td>\n",
+       "      <td>119</td>\n",
+       "      <td>8347</td>\n",
+       "      <td>1.425662</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "      region  user_id  all_users   percent\n",
+       "0       APAC       45       2883  1.560874\n",
+       "1        CIS       30       2900  1.034483\n",
+       "2         EU     2594      42340  6.126594\n",
+       "3  N.America      119       8347  1.425662"
+      ]
+     },
+     "execution_count": 95,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "region_users=pd.merge(region_users, all_region_users, on='region',how='left')\n",
+    "region_users['percent']=region_users['user_id']/region_users['all_users']*100\n",
+    "region_users"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "В итоге получилось, что количество пользователей из Европы всего 6,1%, а по техзаданию должно быть 15%"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Как меняется конверсия в воронке на разных этапах?"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Для начала рассмотрим воронку для всех пользователей"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 40,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "event_users = df.groupby('event_name').agg({'user_id':['count','nunique']}).reset_index()\n",
+    "event_users.set_axis(['event_name', 'count', 'nunique'], axis = 'columns',inplace = True)\n",
+    "event_users = event_users.sort_values(by='nunique', ascending=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 41,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>event_name</th>\n",
+       "      <th>count</th>\n",
+       "      <th>nunique</th>\n",
+       "      <th>percent</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>login</td>\n",
+       "      <td>8501</td>\n",
+       "      <td>2788</td>\n",
+       "      <td>100.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>product_page</td>\n",
+       "      <td>5298</td>\n",
+       "      <td>1757</td>\n",
+       "      <td>63.020086</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>2483</td>\n",
+       "      <td>850</td>\n",
+       "      <td>30.487805</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>product_cart</td>\n",
+       "      <td>2522</td>\n",
+       "      <td>826</td>\n",
+       "      <td>29.626973</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "     event_name  count  nunique     percent\n",
+       "0         login   8501     2788  100.000000\n",
+       "1  product_page   5298     1757   63.020086\n",
+       "2      purchase   2483      850   30.487805\n",
+       "3  product_cart   2522      826   29.626973"
+      ]
+     },
+     "execution_count": 41,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "event_users['percent'] = (event_users['nunique'] / len(df['user_id'].unique()) * 100)\n",
+    "event_users = event_users.reset_index(drop=True)\n",
+    "event_users"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 107,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.plotly.v1+json": {
+       "config": {
+        "plotlyServerURL": "https://plot.ly"
+       },
+       "data": [
+        {
+         "textinfo": "value+percent initial",
+         "type": "funnel",
+         "x": [
+          2788,
+          1757,
+          850,
+          826
+         ],
+         "y": [
+          "login",
+          "product_page",
+          "purchase",
+          "product_cart"
+         ]
+        }
+       ],
+       "layout": {
+        "template": {
+         "data": {
+          "bar": [
+           {
+            "error_x": {
+             "color": "#2a3f5f"
+            },
+            "error_y": {
+             "color": "#2a3f5f"
+            },
+            "marker": {
+             "line": {
+              "color": "#E5ECF6",
+              "width": 0.5
+             }
+            },
+            "type": "bar"
+           }
+          ],
+          "barpolar": [
+           {
+            "marker": {
+             "line": {
+              "color": "#E5ECF6",
+              "width": 0.5
+             }
+            },
+            "type": "barpolar"
+           }
+          ],
+          "carpet": [
+           {
+            "aaxis": {
+             "endlinecolor": "#2a3f5f",
+             "gridcolor": "white",
+             "linecolor": "white",
+             "minorgridcolor": "white",
+             "startlinecolor": "#2a3f5f"
+            },
+            "baxis": {
+             "endlinecolor": "#2a3f5f",
+             "gridcolor": "white",
+             "linecolor": "white",
+             "minorgridcolor": "white",
+             "startlinecolor": "#2a3f5f"
+            },
+            "type": "carpet"
+           }
+          ],
+          "choropleth": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "choropleth"
+           }
+          ],
+          "contour": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "contour"
+           }
+          ],
+          "contourcarpet": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "contourcarpet"
+           }
+          ],
+          "heatmap": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "heatmap"
+           }
+          ],
+          "heatmapgl": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "heatmapgl"
+           }
+          ],
+          "histogram": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "histogram"
+           }
+          ],
+          "histogram2d": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "histogram2d"
+           }
+          ],
+          "histogram2dcontour": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "histogram2dcontour"
+           }
+          ],
+          "mesh3d": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "mesh3d"
+           }
+          ],
+          "parcoords": [
+           {
+            "line": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "parcoords"
+           }
+          ],
+          "scatter": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatter"
+           }
+          ],
+          "scatter3d": [
+           {
+            "line": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatter3d"
+           }
+          ],
+          "scattercarpet": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattercarpet"
+           }
+          ],
+          "scattergeo": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattergeo"
+           }
+          ],
+          "scattergl": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattergl"
+           }
+          ],
+          "scattermapbox": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattermapbox"
+           }
+          ],
+          "scatterpolar": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterpolar"
+           }
+          ],
+          "scatterpolargl": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterpolargl"
+           }
+          ],
+          "scatterternary": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterternary"
+           }
+          ],
+          "surface": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "surface"
+           }
+          ],
+          "table": [
+           {
+            "cells": {
+             "fill": {
+              "color": "#EBF0F8"
+             },
+             "line": {
+              "color": "white"
+             }
+            },
+            "header": {
+             "fill": {
+              "color": "#C8D4E3"
+             },
+             "line": {
+              "color": "white"
+             }
+            },
+            "type": "table"
+           }
+          ]
+         },
+         "layout": {
+          "annotationdefaults": {
+           "arrowcolor": "#2a3f5f",
+           "arrowhead": 0,
+           "arrowwidth": 1
+          },
+          "colorscale": {
+           "diverging": [
+            [
+             0,
+             "#8e0152"
+            ],
+            [
+             0.1,
+             "#c51b7d"
+            ],
+            [
+             0.2,
+             "#de77ae"
+            ],
+            [
+             0.3,
+             "#f1b6da"
+            ],
+            [
+             0.4,
+             "#fde0ef"
+            ],
+            [
+             0.5,
+             "#f7f7f7"
+            ],
+            [
+             0.6,
+             "#e6f5d0"
+            ],
+            [
+             0.7,
+             "#b8e186"
+            ],
+            [
+             0.8,
+             "#7fbc41"
+            ],
+            [
+             0.9,
+             "#4d9221"
+            ],
+            [
+             1,
+             "#276419"
+            ]
+           ],
+           "sequential": [
+            [
+             0,
+             "#0d0887"
+            ],
+            [
+             0.1111111111,
+             "#46039f"
+            ],
+            [
+             0.2222222222,
+             "#7201a8"
+            ],
+            [
+             0.3333333333,
+             "#9c179e"
+            ],
+            [
+             0.4444444444,
+             "#bd3786"
+            ],
+            [
+             0.5555555556,
+             "#d8576b"
+            ],
+            [
+             0.6666666667,
+             "#ed7953"
+            ],
+            [
+             0.7777777778,
+             "#fb9f3a"
+            ],
+            [
+             0.8888888889,
+             "#fdca26"
+            ],
+            [
+             1,
+             "#f0f921"
+            ]
+           ],
+           "sequentialminus": [
+            [
+             0,
+             "#0d0887"
+            ],
+            [
+             0.1111111111,
+             "#46039f"
+            ],
+            [
+             0.2222222222,
+             "#7201a8"
+            ],
+            [
+             0.3333333333,
+             "#9c179e"
+            ],
+            [
+             0.4444444444,
+             "#bd3786"
+            ],
+            [
+             0.5555555556,
+             "#d8576b"
+            ],
+            [
+             0.6666666667,
+             "#ed7953"
+            ],
+            [
+             0.7777777778,
+             "#fb9f3a"
+            ],
+            [
+             0.8888888889,
+             "#fdca26"
+            ],
+            [
+             1,
+             "#f0f921"
+            ]
+           ]
+          },
+          "colorway": [
+           "#636efa",
+           "#EF553B",
+           "#00cc96",
+           "#ab63fa",
+           "#FFA15A",
+           "#19d3f3",
+           "#FF6692",
+           "#B6E880",
+           "#FF97FF",
+           "#FECB52"
+          ],
+          "font": {
+           "color": "#2a3f5f"
+          },
+          "geo": {
+           "bgcolor": "white",
+           "lakecolor": "white",
+           "landcolor": "#E5ECF6",
+           "showlakes": true,
+           "showland": true,
+           "subunitcolor": "white"
+          },
+          "hoverlabel": {
+           "align": "left"
+          },
+          "hovermode": "closest",
+          "mapbox": {
+           "style": "light"
+          },
+          "paper_bgcolor": "white",
+          "plot_bgcolor": "#E5ECF6",
+          "polar": {
+           "angularaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "bgcolor": "#E5ECF6",
+           "radialaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           }
+          },
+          "scene": {
+           "xaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           },
+           "yaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           },
+           "zaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           }
+          },
+          "shapedefaults": {
+           "line": {
+            "color": "#2a3f5f"
+           }
+          },
+          "ternary": {
+           "aaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "baxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "bgcolor": "#E5ECF6",
+           "caxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           }
+          },
+          "title": {
+           "x": 0.05
+          },
+          "xaxis": {
+           "automargin": true,
+           "gridcolor": "white",
+           "linecolor": "white",
+           "ticks": "",
+           "zerolinecolor": "white",
+           "zerolinewidth": 2
+          },
+          "yaxis": {
+           "automargin": true,
+           "gridcolor": "white",
+           "linecolor": "white",
+           "ticks": "",
+           "zerolinecolor": "white",
+           "zerolinewidth": 2
+          }
+         }
+        }
+       }
+      },
+      "text/html": [
+       "<div>\n",
+       "        \n",
+       "        \n",
+       "            <div id=\"3d0effb2-54ba-4cd7-bfe3-f093488fa6dc\" class=\"plotly-graph-div\" style=\"height:525px; width:100%;\"></div>\n",
+       "            <script type=\"text/javascript\">\n",
+       "                require([\"plotly\"], function(Plotly) {\n",
+       "                    window.PLOTLYENV=window.PLOTLYENV || {};\n",
+       "                    \n",
+       "                if (document.getElementById(\"3d0effb2-54ba-4cd7-bfe3-f093488fa6dc\")) {\n",
+       "                    Plotly.newPlot(\n",
+       "                        '3d0effb2-54ba-4cd7-bfe3-f093488fa6dc',\n",
+       "                        [{\"textinfo\": \"value+percent initial\", \"type\": \"funnel\", \"x\": [2788, 1757, 850, 826], \"y\": [\"login\", \"product_page\", \"purchase\", \"product_cart\"]}],\n",
+       "                        {\"template\": {\"data\": {\"bar\": [{\"error_x\": {\"color\": \"#2a3f5f\"}, \"error_y\": {\"color\": \"#2a3f5f\"}, \"marker\": {\"line\": {\"color\": \"#E5ECF6\", \"width\": 0.5}}, \"type\": \"bar\"}], \"barpolar\": [{\"marker\": {\"line\": {\"color\": \"#E5ECF6\", \"width\": 0.5}}, \"type\": \"barpolar\"}], \"carpet\": [{\"aaxis\": {\"endlinecolor\": \"#2a3f5f\", \"gridcolor\": \"white\", \"linecolor\": \"white\", \"minorgridcolor\": \"white\", \"startlinecolor\": \"#2a3f5f\"}, \"baxis\": {\"endlinecolor\": \"#2a3f5f\", \"gridcolor\": \"white\", \"linecolor\": \"white\", \"minorgridcolor\": \"white\", \"startlinecolor\": \"#2a3f5f\"}, \"type\": \"carpet\"}], \"choropleth\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"choropleth\"}], \"contour\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"contour\"}], \"contourcarpet\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"contourcarpet\"}], \"heatmap\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"heatmap\"}], \"heatmapgl\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"heatmapgl\"}], \"histogram\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"histogram\"}], \"histogram2d\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"histogram2d\"}], \"histogram2dcontour\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"histogram2dcontour\"}], \"mesh3d\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"mesh3d\"}], \"parcoords\": [{\"line\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"parcoords\"}], \"scatter\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatter\"}], \"scatter3d\": [{\"line\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatter3d\"}], \"scattercarpet\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattercarpet\"}], \"scattergeo\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattergeo\"}], \"scattergl\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattergl\"}], \"scattermapbox\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattermapbox\"}], \"scatterpolar\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterpolar\"}], \"scatterpolargl\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterpolargl\"}], \"scatterternary\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterternary\"}], \"surface\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"surface\"}], \"table\": [{\"cells\": {\"fill\": {\"color\": \"#EBF0F8\"}, \"line\": {\"color\": \"white\"}}, \"header\": {\"fill\": {\"color\": \"#C8D4E3\"}, \"line\": {\"color\": \"white\"}}, \"type\": \"table\"}]}, \"layout\": {\"annotationdefaults\": {\"arrowcolor\": \"#2a3f5f\", \"arrowhead\": 0, \"arrowwidth\": 1}, \"colorscale\": {\"diverging\": [[0, \"#8e0152\"], [0.1, \"#c51b7d\"], [0.2, \"#de77ae\"], [0.3, \"#f1b6da\"], [0.4, \"#fde0ef\"], [0.5, \"#f7f7f7\"], [0.6, \"#e6f5d0\"], [0.7, \"#b8e186\"], [0.8, \"#7fbc41\"], [0.9, \"#4d9221\"], [1, \"#276419\"]], \"sequential\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"sequentialminus\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]]}, \"colorway\": [\"#636efa\", \"#EF553B\", \"#00cc96\", \"#ab63fa\", \"#FFA15A\", \"#19d3f3\", \"#FF6692\", \"#B6E880\", \"#FF97FF\", \"#FECB52\"], \"font\": {\"color\": \"#2a3f5f\"}, \"geo\": {\"bgcolor\": \"white\", \"lakecolor\": \"white\", \"landcolor\": \"#E5ECF6\", \"showlakes\": true, \"showland\": true, \"subunitcolor\": \"white\"}, \"hoverlabel\": {\"align\": \"left\"}, \"hovermode\": \"closest\", \"mapbox\": {\"style\": \"light\"}, \"paper_bgcolor\": \"white\", \"plot_bgcolor\": \"#E5ECF6\", \"polar\": {\"angularaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"bgcolor\": \"#E5ECF6\", \"radialaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}}, \"scene\": {\"xaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}, \"yaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}, \"zaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}}, \"shapedefaults\": {\"line\": {\"color\": \"#2a3f5f\"}}, \"ternary\": {\"aaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"baxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"bgcolor\": \"#E5ECF6\", \"caxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}}, \"title\": {\"x\": 0.05}, \"xaxis\": {\"automargin\": true, \"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\", \"zerolinecolor\": \"white\", \"zerolinewidth\": 2}, \"yaxis\": {\"automargin\": true, \"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\", \"zerolinecolor\": \"white\", \"zerolinewidth\": 2}}}},\n",
+       "                        {\"responsive\": true}\n",
+       "                    ).then(function(){\n",
+       "                            \n",
+       "var gd = document.getElementById('3d0effb2-54ba-4cd7-bfe3-f093488fa6dc');\n",
+       "var x = new MutationObserver(function (mutations, observer) {{\n",
+       "        var display = window.getComputedStyle(gd).display;\n",
+       "        if (!display || display === 'none') {{\n",
+       "            console.log([gd, 'removed!']);\n",
+       "            Plotly.purge(gd);\n",
+       "            observer.disconnect();\n",
+       "        }}\n",
+       "}});\n",
+       "\n",
+       "// Listen for the removal of the full notebook cells\n",
+       "var notebookContainer = gd.closest('#notebook-container');\n",
+       "if (notebookContainer) {{\n",
+       "    x.observe(notebookContainer, {childList: true});\n",
+       "}}\n",
+       "\n",
+       "// Listen for the clearing of the current output cell\n",
+       "var outputEl = gd.closest('.output');\n",
+       "if (outputEl) {{\n",
+       "    x.observe(outputEl, {childList: true});\n",
+       "}}\n",
+       "\n",
+       "                        })\n",
+       "                };\n",
+       "                });\n",
+       "            </script>\n",
+       "        </div>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "fig = go.Figure(go.Funnel(\n",
+    "    y = event_users['event_name'],\n",
+    "    x = event_users['nunique'],\n",
+    "    textinfo = 'value + percent initial'))\n",
+    "fig.show();"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Воронка группы А**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 43,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "df_A=df[df['group_x']=='A']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 44,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "A_event_users = df_A.groupby('event_name').agg({'user_id':['count','nunique']}).reset_index()\n",
+    "A_event_users.set_axis(['event_name', 'count', 'nunique'], axis = 'columns',inplace = True)\n",
+    "A_event_users = A_event_users.sort_values(by='nunique', ascending=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 45,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>event_name</th>\n",
+       "      <th>count</th>\n",
+       "      <th>nunique</th>\n",
+       "      <th>percent</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>login</td>\n",
+       "      <td>6525</td>\n",
+       "      <td>2082</td>\n",
+       "      <td>100.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>product_page</td>\n",
+       "      <td>4250</td>\n",
+       "      <td>1360</td>\n",
+       "      <td>65.321806</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>1973</td>\n",
+       "      <td>652</td>\n",
+       "      <td>31.316042</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>product_cart</td>\n",
+       "      <td>1989</td>\n",
+       "      <td>631</td>\n",
+       "      <td>30.307397</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "     event_name  count  nunique     percent\n",
+       "0         login   6525     2082  100.000000\n",
+       "1  product_page   4250     1360   65.321806\n",
+       "2      purchase   1973      652   31.316042\n",
+       "3  product_cart   1989      631   30.307397"
+      ]
+     },
+     "execution_count": 45,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "A_event_users['percent'] = (A_event_users['nunique'] / len(df_A['user_id'].unique()) * 100)\n",
+    "A_event_users = A_event_users.reset_index(drop=True)\n",
+    "A_event_users"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 105,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.plotly.v1+json": {
+       "config": {
+        "plotlyServerURL": "https://plot.ly"
+       },
+       "data": [
+        {
+         "textinfo": "value+percent initial",
+         "type": "funnel",
+         "x": [
+          2082,
+          1360,
+          652,
+          631
+         ],
+         "y": [
+          "login",
+          "product_page",
+          "purchase",
+          "product_cart"
+         ]
+        }
+       ],
+       "layout": {
+        "template": {
+         "data": {
+          "bar": [
+           {
+            "error_x": {
+             "color": "#2a3f5f"
+            },
+            "error_y": {
+             "color": "#2a3f5f"
+            },
+            "marker": {
+             "line": {
+              "color": "#E5ECF6",
+              "width": 0.5
+             }
+            },
+            "type": "bar"
+           }
+          ],
+          "barpolar": [
+           {
+            "marker": {
+             "line": {
+              "color": "#E5ECF6",
+              "width": 0.5
+             }
+            },
+            "type": "barpolar"
+           }
+          ],
+          "carpet": [
+           {
+            "aaxis": {
+             "endlinecolor": "#2a3f5f",
+             "gridcolor": "white",
+             "linecolor": "white",
+             "minorgridcolor": "white",
+             "startlinecolor": "#2a3f5f"
+            },
+            "baxis": {
+             "endlinecolor": "#2a3f5f",
+             "gridcolor": "white",
+             "linecolor": "white",
+             "minorgridcolor": "white",
+             "startlinecolor": "#2a3f5f"
+            },
+            "type": "carpet"
+           }
+          ],
+          "choropleth": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "choropleth"
+           }
+          ],
+          "contour": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "contour"
+           }
+          ],
+          "contourcarpet": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "contourcarpet"
+           }
+          ],
+          "heatmap": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "heatmap"
+           }
+          ],
+          "heatmapgl": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "heatmapgl"
+           }
+          ],
+          "histogram": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "histogram"
+           }
+          ],
+          "histogram2d": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "histogram2d"
+           }
+          ],
+          "histogram2dcontour": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "histogram2dcontour"
+           }
+          ],
+          "mesh3d": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "mesh3d"
+           }
+          ],
+          "parcoords": [
+           {
+            "line": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "parcoords"
+           }
+          ],
+          "scatter": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatter"
+           }
+          ],
+          "scatter3d": [
+           {
+            "line": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatter3d"
+           }
+          ],
+          "scattercarpet": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattercarpet"
+           }
+          ],
+          "scattergeo": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattergeo"
+           }
+          ],
+          "scattergl": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattergl"
+           }
+          ],
+          "scattermapbox": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattermapbox"
+           }
+          ],
+          "scatterpolar": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterpolar"
+           }
+          ],
+          "scatterpolargl": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterpolargl"
+           }
+          ],
+          "scatterternary": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterternary"
+           }
+          ],
+          "surface": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "surface"
+           }
+          ],
+          "table": [
+           {
+            "cells": {
+             "fill": {
+              "color": "#EBF0F8"
+             },
+             "line": {
+              "color": "white"
+             }
+            },
+            "header": {
+             "fill": {
+              "color": "#C8D4E3"
+             },
+             "line": {
+              "color": "white"
+             }
+            },
+            "type": "table"
+           }
+          ]
+         },
+         "layout": {
+          "annotationdefaults": {
+           "arrowcolor": "#2a3f5f",
+           "arrowhead": 0,
+           "arrowwidth": 1
+          },
+          "colorscale": {
+           "diverging": [
+            [
+             0,
+             "#8e0152"
+            ],
+            [
+             0.1,
+             "#c51b7d"
+            ],
+            [
+             0.2,
+             "#de77ae"
+            ],
+            [
+             0.3,
+             "#f1b6da"
+            ],
+            [
+             0.4,
+             "#fde0ef"
+            ],
+            [
+             0.5,
+             "#f7f7f7"
+            ],
+            [
+             0.6,
+             "#e6f5d0"
+            ],
+            [
+             0.7,
+             "#b8e186"
+            ],
+            [
+             0.8,
+             "#7fbc41"
+            ],
+            [
+             0.9,
+             "#4d9221"
+            ],
+            [
+             1,
+             "#276419"
+            ]
+           ],
+           "sequential": [
+            [
+             0,
+             "#0d0887"
+            ],
+            [
+             0.1111111111,
+             "#46039f"
+            ],
+            [
+             0.2222222222,
+             "#7201a8"
+            ],
+            [
+             0.3333333333,
+             "#9c179e"
+            ],
+            [
+             0.4444444444,
+             "#bd3786"
+            ],
+            [
+             0.5555555556,
+             "#d8576b"
+            ],
+            [
+             0.6666666667,
+             "#ed7953"
+            ],
+            [
+             0.7777777778,
+             "#fb9f3a"
+            ],
+            [
+             0.8888888889,
+             "#fdca26"
+            ],
+            [
+             1,
+             "#f0f921"
+            ]
+           ],
+           "sequentialminus": [
+            [
+             0,
+             "#0d0887"
+            ],
+            [
+             0.1111111111,
+             "#46039f"
+            ],
+            [
+             0.2222222222,
+             "#7201a8"
+            ],
+            [
+             0.3333333333,
+             "#9c179e"
+            ],
+            [
+             0.4444444444,
+             "#bd3786"
+            ],
+            [
+             0.5555555556,
+             "#d8576b"
+            ],
+            [
+             0.6666666667,
+             "#ed7953"
+            ],
+            [
+             0.7777777778,
+             "#fb9f3a"
+            ],
+            [
+             0.8888888889,
+             "#fdca26"
+            ],
+            [
+             1,
+             "#f0f921"
+            ]
+           ]
+          },
+          "colorway": [
+           "#636efa",
+           "#EF553B",
+           "#00cc96",
+           "#ab63fa",
+           "#FFA15A",
+           "#19d3f3",
+           "#FF6692",
+           "#B6E880",
+           "#FF97FF",
+           "#FECB52"
+          ],
+          "font": {
+           "color": "#2a3f5f"
+          },
+          "geo": {
+           "bgcolor": "white",
+           "lakecolor": "white",
+           "landcolor": "#E5ECF6",
+           "showlakes": true,
+           "showland": true,
+           "subunitcolor": "white"
+          },
+          "hoverlabel": {
+           "align": "left"
+          },
+          "hovermode": "closest",
+          "mapbox": {
+           "style": "light"
+          },
+          "paper_bgcolor": "white",
+          "plot_bgcolor": "#E5ECF6",
+          "polar": {
+           "angularaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "bgcolor": "#E5ECF6",
+           "radialaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           }
+          },
+          "scene": {
+           "xaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           },
+           "yaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           },
+           "zaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           }
+          },
+          "shapedefaults": {
+           "line": {
+            "color": "#2a3f5f"
+           }
+          },
+          "ternary": {
+           "aaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "baxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "bgcolor": "#E5ECF6",
+           "caxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           }
+          },
+          "title": {
+           "x": 0.05
+          },
+          "xaxis": {
+           "automargin": true,
+           "gridcolor": "white",
+           "linecolor": "white",
+           "ticks": "",
+           "zerolinecolor": "white",
+           "zerolinewidth": 2
+          },
+          "yaxis": {
+           "automargin": true,
+           "gridcolor": "white",
+           "linecolor": "white",
+           "ticks": "",
+           "zerolinecolor": "white",
+           "zerolinewidth": 2
+          }
+         }
+        }
+       }
+      },
+      "text/html": [
+       "<div>\n",
+       "        \n",
+       "        \n",
+       "            <div id=\"3f0d3b56-442f-47b9-b40d-e5fef4a96e2f\" class=\"plotly-graph-div\" style=\"height:525px; width:100%;\"></div>\n",
+       "            <script type=\"text/javascript\">\n",
+       "                require([\"plotly\"], function(Plotly) {\n",
+       "                    window.PLOTLYENV=window.PLOTLYENV || {};\n",
+       "                    \n",
+       "                if (document.getElementById(\"3f0d3b56-442f-47b9-b40d-e5fef4a96e2f\")) {\n",
+       "                    Plotly.newPlot(\n",
+       "                        '3f0d3b56-442f-47b9-b40d-e5fef4a96e2f',\n",
+       "                        [{\"textinfo\": \"value+percent initial\", \"type\": \"funnel\", \"x\": [2082, 1360, 652, 631], \"y\": [\"login\", \"product_page\", \"purchase\", \"product_cart\"]}],\n",
+       "                        {\"template\": {\"data\": {\"bar\": [{\"error_x\": {\"color\": \"#2a3f5f\"}, \"error_y\": {\"color\": \"#2a3f5f\"}, \"marker\": {\"line\": {\"color\": \"#E5ECF6\", \"width\": 0.5}}, \"type\": \"bar\"}], \"barpolar\": [{\"marker\": {\"line\": {\"color\": \"#E5ECF6\", \"width\": 0.5}}, \"type\": \"barpolar\"}], \"carpet\": [{\"aaxis\": {\"endlinecolor\": \"#2a3f5f\", \"gridcolor\": \"white\", \"linecolor\": \"white\", \"minorgridcolor\": \"white\", \"startlinecolor\": \"#2a3f5f\"}, \"baxis\": {\"endlinecolor\": \"#2a3f5f\", \"gridcolor\": \"white\", \"linecolor\": \"white\", \"minorgridcolor\": \"white\", \"startlinecolor\": \"#2a3f5f\"}, \"type\": \"carpet\"}], \"choropleth\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"choropleth\"}], \"contour\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"contour\"}], \"contourcarpet\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"contourcarpet\"}], \"heatmap\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"heatmap\"}], \"heatmapgl\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"heatmapgl\"}], \"histogram\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"histogram\"}], \"histogram2d\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"histogram2d\"}], \"histogram2dcontour\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"histogram2dcontour\"}], \"mesh3d\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"mesh3d\"}], \"parcoords\": [{\"line\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"parcoords\"}], \"scatter\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatter\"}], \"scatter3d\": [{\"line\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatter3d\"}], \"scattercarpet\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattercarpet\"}], \"scattergeo\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattergeo\"}], \"scattergl\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattergl\"}], \"scattermapbox\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattermapbox\"}], \"scatterpolar\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterpolar\"}], \"scatterpolargl\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterpolargl\"}], \"scatterternary\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterternary\"}], \"surface\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"surface\"}], \"table\": [{\"cells\": {\"fill\": {\"color\": \"#EBF0F8\"}, \"line\": {\"color\": \"white\"}}, \"header\": {\"fill\": {\"color\": \"#C8D4E3\"}, \"line\": {\"color\": \"white\"}}, \"type\": \"table\"}]}, \"layout\": {\"annotationdefaults\": {\"arrowcolor\": \"#2a3f5f\", \"arrowhead\": 0, \"arrowwidth\": 1}, \"colorscale\": {\"diverging\": [[0, \"#8e0152\"], [0.1, \"#c51b7d\"], [0.2, \"#de77ae\"], [0.3, \"#f1b6da\"], [0.4, \"#fde0ef\"], [0.5, \"#f7f7f7\"], [0.6, \"#e6f5d0\"], [0.7, \"#b8e186\"], [0.8, \"#7fbc41\"], [0.9, \"#4d9221\"], [1, \"#276419\"]], \"sequential\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"sequentialminus\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]]}, \"colorway\": [\"#636efa\", \"#EF553B\", \"#00cc96\", \"#ab63fa\", \"#FFA15A\", \"#19d3f3\", \"#FF6692\", \"#B6E880\", \"#FF97FF\", \"#FECB52\"], \"font\": {\"color\": \"#2a3f5f\"}, \"geo\": {\"bgcolor\": \"white\", \"lakecolor\": \"white\", \"landcolor\": \"#E5ECF6\", \"showlakes\": true, \"showland\": true, \"subunitcolor\": \"white\"}, \"hoverlabel\": {\"align\": \"left\"}, \"hovermode\": \"closest\", \"mapbox\": {\"style\": \"light\"}, \"paper_bgcolor\": \"white\", \"plot_bgcolor\": \"#E5ECF6\", \"polar\": {\"angularaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"bgcolor\": \"#E5ECF6\", \"radialaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}}, \"scene\": {\"xaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}, \"yaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}, \"zaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}}, \"shapedefaults\": {\"line\": {\"color\": \"#2a3f5f\"}}, \"ternary\": {\"aaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"baxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"bgcolor\": \"#E5ECF6\", \"caxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}}, \"title\": {\"x\": 0.05}, \"xaxis\": {\"automargin\": true, \"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\", \"zerolinecolor\": \"white\", \"zerolinewidth\": 2}, \"yaxis\": {\"automargin\": true, \"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\", \"zerolinecolor\": \"white\", \"zerolinewidth\": 2}}}},\n",
+       "                        {\"responsive\": true}\n",
+       "                    ).then(function(){\n",
+       "                            \n",
+       "var gd = document.getElementById('3f0d3b56-442f-47b9-b40d-e5fef4a96e2f');\n",
+       "var x = new MutationObserver(function (mutations, observer) {{\n",
+       "        var display = window.getComputedStyle(gd).display;\n",
+       "        if (!display || display === 'none') {{\n",
+       "            console.log([gd, 'removed!']);\n",
+       "            Plotly.purge(gd);\n",
+       "            observer.disconnect();\n",
+       "        }}\n",
+       "}});\n",
+       "\n",
+       "// Listen for the removal of the full notebook cells\n",
+       "var notebookContainer = gd.closest('#notebook-container');\n",
+       "if (notebookContainer) {{\n",
+       "    x.observe(notebookContainer, {childList: true});\n",
+       "}}\n",
+       "\n",
+       "// Listen for the clearing of the current output cell\n",
+       "var outputEl = gd.closest('.output');\n",
+       "if (outputEl) {{\n",
+       "    x.observe(outputEl, {childList: true});\n",
+       "}}\n",
+       "\n",
+       "                        })\n",
+       "                };\n",
+       "                });\n",
+       "            </script>\n",
+       "        </div>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "fig = go.Figure(go.Funnel(\n",
+    "    y = A_event_users['event_name'],\n",
+    "    x = A_event_users['nunique'],\n",
+    "    textinfo = 'value + percent initial'))\n",
+    "fig.show();"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Воронка группы B**"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 47,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df_B=df[df['group_x']=='B']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 48,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "B_event_users = df_B.groupby('event_name').agg({'user_id':['count','nunique']}).reset_index()\n",
+    "B_event_users.set_axis(['event_name', 'count', 'nunique'], axis = 'columns',inplace = True)\n",
+    "B_event_users = B_event_users.sort_values(by='nunique', ascending=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 49,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>event_name</th>\n",
+       "      <th>count</th>\n",
+       "      <th>nunique</th>\n",
+       "      <th>percent</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <td>0</td>\n",
+       "      <td>login</td>\n",
+       "      <td>1976</td>\n",
+       "      <td>706</td>\n",
+       "      <td>100.000000</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>1</td>\n",
+       "      <td>product_page</td>\n",
+       "      <td>1048</td>\n",
+       "      <td>397</td>\n",
+       "      <td>56.232295</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>2</td>\n",
+       "      <td>purchase</td>\n",
+       "      <td>510</td>\n",
+       "      <td>198</td>\n",
+       "      <td>28.045326</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <td>3</td>\n",
+       "      <td>product_cart</td>\n",
+       "      <td>533</td>\n",
+       "      <td>195</td>\n",
+       "      <td>27.620397</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "     event_name  count  nunique     percent\n",
+       "0         login   1976      706  100.000000\n",
+       "1  product_page   1048      397   56.232295\n",
+       "2      purchase    510      198   28.045326\n",
+       "3  product_cart    533      195   27.620397"
+      ]
+     },
+     "execution_count": 49,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "B_event_users['percent'] = (B_event_users['nunique'] / len(df_B['user_id'].unique()) * 100)\n",
+    "B_event_users = B_event_users.reset_index(drop=True)\n",
+    "B_event_users"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 106,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "application/vnd.plotly.v1+json": {
+       "config": {
+        "plotlyServerURL": "https://plot.ly"
+       },
+       "data": [
+        {
+         "textinfo": "value+percent initial",
+         "type": "funnel",
+         "x": [
+          706,
+          397,
+          198,
+          195
+         ],
+         "y": [
+          "login",
+          "product_page",
+          "purchase",
+          "product_cart"
+         ]
+        }
+       ],
+       "layout": {
+        "template": {
+         "data": {
+          "bar": [
+           {
+            "error_x": {
+             "color": "#2a3f5f"
+            },
+            "error_y": {
+             "color": "#2a3f5f"
+            },
+            "marker": {
+             "line": {
+              "color": "#E5ECF6",
+              "width": 0.5
+             }
+            },
+            "type": "bar"
+           }
+          ],
+          "barpolar": [
+           {
+            "marker": {
+             "line": {
+              "color": "#E5ECF6",
+              "width": 0.5
+             }
+            },
+            "type": "barpolar"
+           }
+          ],
+          "carpet": [
+           {
+            "aaxis": {
+             "endlinecolor": "#2a3f5f",
+             "gridcolor": "white",
+             "linecolor": "white",
+             "minorgridcolor": "white",
+             "startlinecolor": "#2a3f5f"
+            },
+            "baxis": {
+             "endlinecolor": "#2a3f5f",
+             "gridcolor": "white",
+             "linecolor": "white",
+             "minorgridcolor": "white",
+             "startlinecolor": "#2a3f5f"
+            },
+            "type": "carpet"
+           }
+          ],
+          "choropleth": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "choropleth"
+           }
+          ],
+          "contour": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "contour"
+           }
+          ],
+          "contourcarpet": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "contourcarpet"
+           }
+          ],
+          "heatmap": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "heatmap"
+           }
+          ],
+          "heatmapgl": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "heatmapgl"
+           }
+          ],
+          "histogram": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "histogram"
+           }
+          ],
+          "histogram2d": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "histogram2d"
+           }
+          ],
+          "histogram2dcontour": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "histogram2dcontour"
+           }
+          ],
+          "mesh3d": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "type": "mesh3d"
+           }
+          ],
+          "parcoords": [
+           {
+            "line": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "parcoords"
+           }
+          ],
+          "scatter": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatter"
+           }
+          ],
+          "scatter3d": [
+           {
+            "line": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatter3d"
+           }
+          ],
+          "scattercarpet": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattercarpet"
+           }
+          ],
+          "scattergeo": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattergeo"
+           }
+          ],
+          "scattergl": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattergl"
+           }
+          ],
+          "scattermapbox": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scattermapbox"
+           }
+          ],
+          "scatterpolar": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterpolar"
+           }
+          ],
+          "scatterpolargl": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterpolargl"
+           }
+          ],
+          "scatterternary": [
+           {
+            "marker": {
+             "colorbar": {
+              "outlinewidth": 0,
+              "ticks": ""
+             }
+            },
+            "type": "scatterternary"
+           }
+          ],
+          "surface": [
+           {
+            "colorbar": {
+             "outlinewidth": 0,
+             "ticks": ""
+            },
+            "colorscale": [
+             [
+              0,
+              "#0d0887"
+             ],
+             [
+              0.1111111111,
+              "#46039f"
+             ],
+             [
+              0.2222222222,
+              "#7201a8"
+             ],
+             [
+              0.3333333333,
+              "#9c179e"
+             ],
+             [
+              0.4444444444,
+              "#bd3786"
+             ],
+             [
+              0.5555555556,
+              "#d8576b"
+             ],
+             [
+              0.6666666667,
+              "#ed7953"
+             ],
+             [
+              0.7777777778,
+              "#fb9f3a"
+             ],
+             [
+              0.8888888889,
+              "#fdca26"
+             ],
+             [
+              1,
+              "#f0f921"
+             ]
+            ],
+            "type": "surface"
+           }
+          ],
+          "table": [
+           {
+            "cells": {
+             "fill": {
+              "color": "#EBF0F8"
+             },
+             "line": {
+              "color": "white"
+             }
+            },
+            "header": {
+             "fill": {
+              "color": "#C8D4E3"
+             },
+             "line": {
+              "color": "white"
+             }
+            },
+            "type": "table"
+           }
+          ]
+         },
+         "layout": {
+          "annotationdefaults": {
+           "arrowcolor": "#2a3f5f",
+           "arrowhead": 0,
+           "arrowwidth": 1
+          },
+          "colorscale": {
+           "diverging": [
+            [
+             0,
+             "#8e0152"
+            ],
+            [
+             0.1,
+             "#c51b7d"
+            ],
+            [
+             0.2,
+             "#de77ae"
+            ],
+            [
+             0.3,
+             "#f1b6da"
+            ],
+            [
+             0.4,
+             "#fde0ef"
+            ],
+            [
+             0.5,
+             "#f7f7f7"
+            ],
+            [
+             0.6,
+             "#e6f5d0"
+            ],
+            [
+             0.7,
+             "#b8e186"
+            ],
+            [
+             0.8,
+             "#7fbc41"
+            ],
+            [
+             0.9,
+             "#4d9221"
+            ],
+            [
+             1,
+             "#276419"
+            ]
+           ],
+           "sequential": [
+            [
+             0,
+             "#0d0887"
+            ],
+            [
+             0.1111111111,
+             "#46039f"
+            ],
+            [
+             0.2222222222,
+             "#7201a8"
+            ],
+            [
+             0.3333333333,
+             "#9c179e"
+            ],
+            [
+             0.4444444444,
+             "#bd3786"
+            ],
+            [
+             0.5555555556,
+             "#d8576b"
+            ],
+            [
+             0.6666666667,
+             "#ed7953"
+            ],
+            [
+             0.7777777778,
+             "#fb9f3a"
+            ],
+            [
+             0.8888888889,
+             "#fdca26"
+            ],
+            [
+             1,
+             "#f0f921"
+            ]
+           ],
+           "sequentialminus": [
+            [
+             0,
+             "#0d0887"
+            ],
+            [
+             0.1111111111,
+             "#46039f"
+            ],
+            [
+             0.2222222222,
+             "#7201a8"
+            ],
+            [
+             0.3333333333,
+             "#9c179e"
+            ],
+            [
+             0.4444444444,
+             "#bd3786"
+            ],
+            [
+             0.5555555556,
+             "#d8576b"
+            ],
+            [
+             0.6666666667,
+             "#ed7953"
+            ],
+            [
+             0.7777777778,
+             "#fb9f3a"
+            ],
+            [
+             0.8888888889,
+             "#fdca26"
+            ],
+            [
+             1,
+             "#f0f921"
+            ]
+           ]
+          },
+          "colorway": [
+           "#636efa",
+           "#EF553B",
+           "#00cc96",
+           "#ab63fa",
+           "#FFA15A",
+           "#19d3f3",
+           "#FF6692",
+           "#B6E880",
+           "#FF97FF",
+           "#FECB52"
+          ],
+          "font": {
+           "color": "#2a3f5f"
+          },
+          "geo": {
+           "bgcolor": "white",
+           "lakecolor": "white",
+           "landcolor": "#E5ECF6",
+           "showlakes": true,
+           "showland": true,
+           "subunitcolor": "white"
+          },
+          "hoverlabel": {
+           "align": "left"
+          },
+          "hovermode": "closest",
+          "mapbox": {
+           "style": "light"
+          },
+          "paper_bgcolor": "white",
+          "plot_bgcolor": "#E5ECF6",
+          "polar": {
+           "angularaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "bgcolor": "#E5ECF6",
+           "radialaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           }
+          },
+          "scene": {
+           "xaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           },
+           "yaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           },
+           "zaxis": {
+            "backgroundcolor": "#E5ECF6",
+            "gridcolor": "white",
+            "gridwidth": 2,
+            "linecolor": "white",
+            "showbackground": true,
+            "ticks": "",
+            "zerolinecolor": "white"
+           }
+          },
+          "shapedefaults": {
+           "line": {
+            "color": "#2a3f5f"
+           }
+          },
+          "ternary": {
+           "aaxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "baxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           },
+           "bgcolor": "#E5ECF6",
+           "caxis": {
+            "gridcolor": "white",
+            "linecolor": "white",
+            "ticks": ""
+           }
+          },
+          "title": {
+           "x": 0.05
+          },
+          "xaxis": {
+           "automargin": true,
+           "gridcolor": "white",
+           "linecolor": "white",
+           "ticks": "",
+           "zerolinecolor": "white",
+           "zerolinewidth": 2
+          },
+          "yaxis": {
+           "automargin": true,
+           "gridcolor": "white",
+           "linecolor": "white",
+           "ticks": "",
+           "zerolinecolor": "white",
+           "zerolinewidth": 2
+          }
+         }
+        }
+       }
+      },
+      "text/html": [
+       "<div>\n",
+       "        \n",
+       "        \n",
+       "            <div id=\"157579cc-db19-4a3f-baf6-d334d083456c\" class=\"plotly-graph-div\" style=\"height:525px; width:100%;\"></div>\n",
+       "            <script type=\"text/javascript\">\n",
+       "                require([\"plotly\"], function(Plotly) {\n",
+       "                    window.PLOTLYENV=window.PLOTLYENV || {};\n",
+       "                    \n",
+       "                if (document.getElementById(\"157579cc-db19-4a3f-baf6-d334d083456c\")) {\n",
+       "                    Plotly.newPlot(\n",
+       "                        '157579cc-db19-4a3f-baf6-d334d083456c',\n",
+       "                        [{\"textinfo\": \"value+percent initial\", \"type\": \"funnel\", \"x\": [706, 397, 198, 195], \"y\": [\"login\", \"product_page\", \"purchase\", \"product_cart\"]}],\n",
+       "                        {\"template\": {\"data\": {\"bar\": [{\"error_x\": {\"color\": \"#2a3f5f\"}, \"error_y\": {\"color\": \"#2a3f5f\"}, \"marker\": {\"line\": {\"color\": \"#E5ECF6\", \"width\": 0.5}}, \"type\": \"bar\"}], \"barpolar\": [{\"marker\": {\"line\": {\"color\": \"#E5ECF6\", \"width\": 0.5}}, \"type\": \"barpolar\"}], \"carpet\": [{\"aaxis\": {\"endlinecolor\": \"#2a3f5f\", \"gridcolor\": \"white\", \"linecolor\": \"white\", \"minorgridcolor\": \"white\", \"startlinecolor\": \"#2a3f5f\"}, \"baxis\": {\"endlinecolor\": \"#2a3f5f\", \"gridcolor\": \"white\", \"linecolor\": \"white\", \"minorgridcolor\": \"white\", \"startlinecolor\": \"#2a3f5f\"}, \"type\": \"carpet\"}], \"choropleth\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"choropleth\"}], \"contour\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"contour\"}], \"contourcarpet\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"contourcarpet\"}], \"heatmap\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"heatmap\"}], \"heatmapgl\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"heatmapgl\"}], \"histogram\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"histogram\"}], \"histogram2d\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"histogram2d\"}], \"histogram2dcontour\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"histogram2dcontour\"}], \"mesh3d\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"type\": \"mesh3d\"}], \"parcoords\": [{\"line\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"parcoords\"}], \"scatter\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatter\"}], \"scatter3d\": [{\"line\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatter3d\"}], \"scattercarpet\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattercarpet\"}], \"scattergeo\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattergeo\"}], \"scattergl\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattergl\"}], \"scattermapbox\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scattermapbox\"}], \"scatterpolar\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterpolar\"}], \"scatterpolargl\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterpolargl\"}], \"scatterternary\": [{\"marker\": {\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}}, \"type\": \"scatterternary\"}], \"surface\": [{\"colorbar\": {\"outlinewidth\": 0, \"ticks\": \"\"}, \"colorscale\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"type\": \"surface\"}], \"table\": [{\"cells\": {\"fill\": {\"color\": \"#EBF0F8\"}, \"line\": {\"color\": \"white\"}}, \"header\": {\"fill\": {\"color\": \"#C8D4E3\"}, \"line\": {\"color\": \"white\"}}, \"type\": \"table\"}]}, \"layout\": {\"annotationdefaults\": {\"arrowcolor\": \"#2a3f5f\", \"arrowhead\": 0, \"arrowwidth\": 1}, \"colorscale\": {\"diverging\": [[0, \"#8e0152\"], [0.1, \"#c51b7d\"], [0.2, \"#de77ae\"], [0.3, \"#f1b6da\"], [0.4, \"#fde0ef\"], [0.5, \"#f7f7f7\"], [0.6, \"#e6f5d0\"], [0.7, \"#b8e186\"], [0.8, \"#7fbc41\"], [0.9, \"#4d9221\"], [1, \"#276419\"]], \"sequential\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]], \"sequentialminus\": [[0.0, \"#0d0887\"], [0.1111111111111111, \"#46039f\"], [0.2222222222222222, \"#7201a8\"], [0.3333333333333333, \"#9c179e\"], [0.4444444444444444, \"#bd3786\"], [0.5555555555555556, \"#d8576b\"], [0.6666666666666666, \"#ed7953\"], [0.7777777777777778, \"#fb9f3a\"], [0.8888888888888888, \"#fdca26\"], [1.0, \"#f0f921\"]]}, \"colorway\": [\"#636efa\", \"#EF553B\", \"#00cc96\", \"#ab63fa\", \"#FFA15A\", \"#19d3f3\", \"#FF6692\", \"#B6E880\", \"#FF97FF\", \"#FECB52\"], \"font\": {\"color\": \"#2a3f5f\"}, \"geo\": {\"bgcolor\": \"white\", \"lakecolor\": \"white\", \"landcolor\": \"#E5ECF6\", \"showlakes\": true, \"showland\": true, \"subunitcolor\": \"white\"}, \"hoverlabel\": {\"align\": \"left\"}, \"hovermode\": \"closest\", \"mapbox\": {\"style\": \"light\"}, \"paper_bgcolor\": \"white\", \"plot_bgcolor\": \"#E5ECF6\", \"polar\": {\"angularaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"bgcolor\": \"#E5ECF6\", \"radialaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}}, \"scene\": {\"xaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}, \"yaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}, \"zaxis\": {\"backgroundcolor\": \"#E5ECF6\", \"gridcolor\": \"white\", \"gridwidth\": 2, \"linecolor\": \"white\", \"showbackground\": true, \"ticks\": \"\", \"zerolinecolor\": \"white\"}}, \"shapedefaults\": {\"line\": {\"color\": \"#2a3f5f\"}}, \"ternary\": {\"aaxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"baxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}, \"bgcolor\": \"#E5ECF6\", \"caxis\": {\"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\"}}, \"title\": {\"x\": 0.05}, \"xaxis\": {\"automargin\": true, \"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\", \"zerolinecolor\": \"white\", \"zerolinewidth\": 2}, \"yaxis\": {\"automargin\": true, \"gridcolor\": \"white\", \"linecolor\": \"white\", \"ticks\": \"\", \"zerolinecolor\": \"white\", \"zerolinewidth\": 2}}}},\n",
+       "                        {\"responsive\": true}\n",
+       "                    ).then(function(){\n",
+       "                            \n",
+       "var gd = document.getElementById('157579cc-db19-4a3f-baf6-d334d083456c');\n",
+       "var x = new MutationObserver(function (mutations, observer) {{\n",
+       "        var display = window.getComputedStyle(gd).display;\n",
+       "        if (!display || display === 'none') {{\n",
+       "            console.log([gd, 'removed!']);\n",
+       "            Plotly.purge(gd);\n",
+       "            observer.disconnect();\n",
+       "        }}\n",
+       "}});\n",
+       "\n",
+       "// Listen for the removal of the full notebook cells\n",
+       "var notebookContainer = gd.closest('#notebook-container');\n",
+       "if (notebookContainer) {{\n",
+       "    x.observe(notebookContainer, {childList: true});\n",
+       "}}\n",
+       "\n",
+       "// Listen for the clearing of the current output cell\n",
+       "var outputEl = gd.closest('.output');\n",
+       "if (outputEl) {{\n",
+       "    x.observe(outputEl, {childList: true});\n",
+       "}}\n",
+       "\n",
+       "                        })\n",
+       "                };\n",
+       "                });\n",
+       "            </script>\n",
+       "        </div>"
+      ]
+     },
+     "metadata": {},
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "fig = go.Figure(go.Funnel(\n",
+    "    y = B_event_users['event_name'],\n",
+    "    x = B_event_users['nunique'],\n",
+    "    textinfo = 'value + percent initial'\n",
+    "    ))\n",
+    "fig.show();"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "В воронке группы В должно быть улучшение на 10% по сравнению с группой А, но улучшения нет."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Количество событий на пользователя одинаково распределены в выборках?"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "В группе А"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 51,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "7.0782901056676275"
+      ]
+     },
+     "execution_count": 51,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "df_A['event_name'].count()/df_A['user_id'].nunique()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "В группе В"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 52,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "5.760623229461756"
+      ]
+     },
+     "execution_count": 52,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "df_B['event_name'].count()/df_B['user_id'].nunique()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Как число событий распределено по дням?"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 53,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/png": "iVBORw0KGgoAAAANSUhEUgAAA3MAAAIQCAYAAAArXjc6AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAALEgAACxIB0t1+/AAAADh0RVh0U29mdHdhcmUAbWF0cGxvdGxpYiB2ZXJzaW9uMy4xLjAsIGh0dHA6Ly9tYXRwbG90bGliLm9yZy+17YcXAAAgAElEQVR4nO3deZhldX3v+88XGiURjyC2XKXxNBocSJxIi0SP0YQjweAVhwyYiXg0mBtNPJoYO9M1gzkhMTcmJkQvRiIao3DVKE9wODhl0CA0CE4gdrSV5lFpQXGKiejv/lELUrYNm66qrv37Vb1ez1NP773W2nu/q7pZ9LfX2mtXay0AAACMZb95BwAAALD3DHMAAAADMswBAAAMyDAHAAAwIMMcAADAgAxzAAAAA9ow74Bbc5e73KVt3rx53hkAAABzcckll3yutbZxT+u6HuY2b96cbdu2zTsDAABgLqrqk7e0zmmWAAAAAzLMAQAADGjmMFdVZ1XVtVX1od2W/2JVXVlVH66qP1q0/NeqantVfbSqfmjR8hOnZdurauvKfhsAAADry215z9wrkvxFklfetKCqfiDJyUke2Fr796q667T86CSnJPnuJHdP8vaquvf0sDOSPDrJziQXV9V5rbWPrNQ3AgAALN3Xv/717Ny5M1/72tfmnbIuHXjggdm0aVMOOOCA2/yYmcNca+0fq2rzbov/rySnt9b+fdrm2mn5yUleOy3/RFVtT3LstG57a+3jSVJVr522NcwBAEAHdu7cmTve8Y7ZvHlzqmreOetKay3XXXdddu7cmSOPPPI2P26p75m7d5JHVNX7quofquoh0/LDk1y9aLud07JbWv5tquq0qtpWVdt27dq1xDwAAGBvfO1rX8uhhx5qkJuDqsqhhx6610dFlzrMbUhy5yTHJXluknNrhX7XW2tntta2tNa2bNy4x49TAAAA9gGD3Pws5We/1GFuZ5I3tAUXJflmkrskuSbJEYu22zQtu6XlAAAA+9wb3/jGfOQja+tdXkv90PA3JvmBJO+aLnByuySfS3Jekr+tqj/JwgVQjkpyUZJKclRVHZmFIe6UJD+xzHYAAGAf2bz1/BV9vh2nn7Siz7e33vjGN+axj31sjj766Ll2rKTb8tEEr0nyL0nuU1U7q+qpSc5Kcs/p4wpem+TU6Sjdh5Ocm4ULm7w1yTNaa99ord2Y5JlJ3pbkiiTnTtsCAAAkSf7mb/4mxx57bB70oAfl6U9/es4444w897nPvXn9K17xijzzmc/c47bf+MY3kiQHHXRQfuM3fiMPfOADc9xxx+Wzn/1s3vve9+a8887Lc5/73DzoQQ/Kv/7rv+7x9R/1qEflec97Xo499tjc+973zj/90z8lSXbs2JFHPOIROeaYY3LMMcfkve99b5Lk3e9+dx75yEfm5JNPzj3vec9s3bo1r371q3Psscfm/ve//82vs2vXrjzpSU/KQx7ykDzkIQ/Je97znhX5ec0c5lprT26t3a21dkBrbVNr7eWttf9orf1Ua+17WmvHtNbeuWj732+t3au1dp/W2lsWLX9za+3e07rfX5F6AABgTbjiiityzjnn5D3veU8uu+yy7L///jnooIPyd3/3dzdvc8455+SUU07Z47avfvWrkyRf+cpXctxxx+Xyyy/P93//9+dlL3tZHvawh+Vxj3tcXvjCF+ayyy7Lve51r1vsuPHGG3PRRRflT//0T/M7v/M7SZK73vWuueCCC3LppZfmnHPOyS/90i/dvP3ll1+el770pbniiivyqle9KldddVUuuuiiPO1pT8uf//mfJ0me9axn5dnPfnYuvvjivP71r8/Tnva0FfmZLfU0SwAAgBXzjne8I5dcckke8pCFC+X/27/9W+5617vmnve8Zy688MIcddRRufLKK/Pwhz88Z5xxxh63TZLb3e52eexjH5sk+d7v/d5ccMEFe9XxxCc+8ebH7tixI8nCZ/A985nPvHlwvOqqq27e/iEPeUjudre7JUnuda975YQTTkiS3P/+98+73vWuJMnb3/72b3m/3he/+MV8+ctfzkEHHbRXbbszzAEAAHPXWsupp56aP/iDP/iW5WeddVbOPffc3Pe+980TnvCEVNUtbpskBxxwwM1Xhtx///1z44037lXH7W9/+2977Ite9KIcdthhufzyy/PNb34zBx544LdtnyT77bffzff322+/mx//zW9+MxdeeOG3PG4lLPVqlgAAACvm+OOPz+te97pce+21SZLrr78+n/zkJ/OEJzwhb3rTm/Ka17wmp5xyyq1ue2vueMc75ktf+tKS2m644Ybc7W53y3777ZdXvepVN78/77Y64YQTbj7lMkkuu+yyJXXszjAHAADM3dFHH50XvOAF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9NekZ7bemnrrSfpr2uc962WYu3beAXvQW1NvPUl/TXpm662pt56kvyY9s/XWpGe23pp660n6a9IzW29NvfUk/TXt8541/Z45AACAtWrNHZmrzj4Nvsem3np6bNIzXlNvPT026RmvSc94Tb319NikZ7ym3np6bJpXz5ob5pL8v0kemeS6JC+uqj9ZtO6J80nqrqm3nqS/Jj2z9dbUW0/SX5Oe2Xpr0jNbb0299ST9NemZrbem3nqS/prm09NaW1NfST6w6PaGJGcmeUOS2yd5v6b+enps0jNeU289PTbpGa9Jz3hNvfX02KRnvKbeenpsmlfPWjwy9y2fvt5aOy3JZenoE+o7aOqtp8cmPeM19dbTY5Oe8Zr0jNfUW0+PTXrGa+qtp8em+fSs9tS6ClPx3yQ5cQ/Ln5bk65r66+mxSc94Tb319NikZ7wmPeM19dbTY5Oe8Zp66+mxaV49rmYJAAAwoLV4muUtqqpHz7thd7019daT9NekZ7bemnrrSfpr0jNbb016ZuutqbeepL8mPbP11tRbT9Jf077sWVdH5qrqU621e8y7Y7HemnrrSfpr0jNbb0299ST9NemZrbcmPbP11tRbT9Jfk57ZemvqrSfpr2lf9mzYF086T1V13i2tSnLoarbc/MKdNfXWk/TXpGe23pp660n6a9IzW29Nembrram3nqS/Jj2z9dbUW0/SX9O8etbcMJfkEUl+KsmXd1teSY5d/Zwk/TX11pP016Rntt6aeutJ+mvSM1tvTXpm662pt56kvyY9s/XW1FtP0l/TXHrW4jB3YZKvttb+YfcVVfXROfQk/TX11pP016Rntt6aeutJ+mvSM1tvTXpm662pt56kvyY9s/XW1FtP0l/TXHrW1XvmAAAA1op1cTXLqnrsvBt211tTbz1Jf016ZuutqbeepL8mPbP11qRntt6aeutJ+mvSM1tvTb31JP01rUbPujgyV1WXttaOmXfHYr019daT9NekZ7bemnrrSfpr0jNbb016ZuutqbeepL8mPbP11tRbT9Jf02r0rIsjc1l442FvemvqrSfpr0nPbL019daT9NekZ7bemvTM1ltTbz1Jf016ZuutqbeepL+mfd6zXoa5p887YA96a+qtJ+mvSc9svTX11pP016Rntt6a9MzWW1NvPUl/TXpm662pt56kv6Z93rMWr2aZqrpvkpOTHD4t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\n",
+      "text/plain": [
+       "<Figure size 1080x576 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "df_A.groupby('date').agg({'event_name': 'count'}).plot(kind='bar', figsize=(15, 8))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Для группы А: первая неделя затишье, затем резкий прирост количества событий 21.12 пик и затем на снижение."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 54,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "image/png": "iVBORw0KGgoAAAANSUhEUgAAA20AAAIQCAYAAAASOYZhAAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAALEgAACxIB0t1+/AAAADh0RVh0U29mdHdhcmUAbWF0cGxvdGxpYiB2ZXJzaW9uMy4xLjAsIGh0dHA6Ly9tYXRwbG90bGliLm9yZy+17YcXAAAgAElEQVR4nO3de5SldX3n+88XGsEIIwjIQRqnkeCFDNiSpiUalZGRoHgENXFwZgzxaDArMDFOZOzcTsyMjp2YRMcM6sHRgMZROF5ZtppBgknEIDTYoNCIqE1oFkILiqDRI/A7f9TTWLa76EtV7frtqtdrrVpUPfv27gK3fNi7nqrWWgAAAOjTbgsdAAAAwMyMNgAAgI4ZbQAAAB0z2gAAADpmtAEAAHTMaAMAAOjYsoUOSJIDDjigrVixYqEzAAAAFsRVV131rdbagaMu2+5oq6q9kvx9kj2H63+otfZHVXVekmcluXu46q+11jZUVSX570mel+T7w/GrH+oxVqxYkfXr1+/onwcAAGBRqaqbZ7psR15p+2GSZ7fW7q2qPZJ8rqo+NVx2dmvtQ9tc/7lJjhg+nprkHcNfAQAA2Enb/Zm2NuXe4cs9ho/2EDc5Jcl7h9tdnmTfqjp49qkAAABLzw6diKSqdq+qDUnuSHJxa+0Lw0VvrKprq+otVbXncOyQJLdMu/nm4RgAAAA7aYdORNJauz/JyqraN8lHq+pfJfndJN9M8rAk5yZ5XZL/sqMPXFVnJDkjSR772MfuZDYAALArfvSjH2Xz5s35wQ9+sNApS9Jee+2V5cuXZ4899tjh2+zU2SNba9+pqkuTnNRa+7Ph8A+r6q+SvHb4+tYkh0672fLh2Lb3dW6mxl5WrVr1UG+3BAAA5sjmzZuzzz77ZMWKFZk6hyDj0lrLnXfemc2bN+ewww7b4dtt9+2RVXXg8ApbqurhSZ6T5IatP6c2nC3y1CRfHm5yUZJfrSnHJbm7tXbbzv1xAACA+fCDH/wg+++/v8G2AKoq+++//06/yrkjr7QdnOT8qto9UyPvwtbaJ6rqb6vqwCSVZEOS3xiu/8lMne7/pkyd8v/lO1UEAADMK4Nt4ezK9367o621dm2Sp4w4/uwZrt+SnLnTJQAAALP0sY99LI9//ONz5JFHLnTKnNmpn2kDAAAWlxVr1s3p/W1ae/Kc3t/O+tjHPpbnP//5i2q07dAp/wEAAObKX//1X2f16tVZuXJlXvWqV+Wcc87J2Wef/eDl5513Xs4666yR173//vuTJHvvvXd+//d/P09+8pNz3HHH5fbbb8/nP//5XHTRRTn77LOzcuXKfO1rXxv5+Mcff3xe97rXZfXq1Xn84x+ff/iHf0iSbNq0Kc94xjNyzDHH5JhjjsnnP//5JMlnP/vZPOtZz8opp5ySxz3ucVmzZk3e//73Z/Xq1TnqqKMefJwtW7bkxS9+cY499tgce+yxueyyy+bk+2W0AQAAY7Nx48ZccMEFueyyy7Jhw4bsvvvu2XvvvfPRj370wetccMEFOe2000Ze9/3vf3+S5Hvf+16OO+64XHPNNXnmM5+Zd73rXXna056WF7zgBXnzm9+cDRs25PDDD5+x47777ssVV1yRt771rfnjP/7jJMmjH/3oXHzxxbn66qtzwQUX5Ld+67cevP4111yTd77zndm4cWPe97735cYbb8wVV1yRV77ylfnLv/zLJMmrX/3qvOY1r8mVV16ZD3/4w3nlK185J98zb48EAADG5pJLLslVV12VY489Nknyz//8z3n0ox+dxz3ucbn88stzxBFH5IYbbsjTn/70nHPOOSOvmyQPe9jD8vznPz9J8vM///O5+OKLd6rjRS960YO33bRpU5Kp32F31llnPTgQb7zxxgevf+yxx+bggw9Okhx++OE58cQTkyRHHXVULr300iTJZz7zmVx//fUP3ua73/1u7r333uy999471bYtow0AABib1lpOP/30vOlNb/qJ4+95z3ty4YUX5olPfGJe+MIXpqpmvG6S7LHHHg+eiXH33XfPfffdt1Mde+6550/d9i1veUsOOuigXHPNNXnggQey1157/dT1k2S33XZ78Ovddtvtwds/8MADufzyy3/idnPB2yMBAICxOeGEE/KhD30od9xxR5Lkrrvuys0335wXvvCF+fjHP54PfOADOe200x7yug9ln332yT333LNLbXfffXcOPvjg7Lbbbnnf+9734M/P7agTTzzxwbdKJsmGDRt2qWNbRhsAADA2Rx55ZN7whjfkxBNPzNFHH53nPOc5ue2227LffvvlSU96Um6++easXr36Ia/7UE477bS8+c1vzlOe8pQZT0Qyk9/8zd/M+eefnyc/+cm54YYb8ohHPGKnbv+2t70t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\n",
+      "text/plain": [
+       "<Figure size 1080x576 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "df_B.groupby('date').agg({'event_name': 'count'}).plot(kind='bar', figsize=(15, 8))\n",
+    "plt.show()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Для группы В: первую неделю неравномерно: то много событий, то мало, затем неделя равномерно и как в А 21.12 пик, после которого совсем небольшие количества событий."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Оценка результатов A/B-тестирования"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Конверсия в покупки**"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Нулевая гипотеза*: Конверсия в группе A равна конверсии в группе B\n",
+    "\n",
+    "*Альтернативная гипотеза*: Конверсия в группе A не равна конверсии в группе B"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 55,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "alpha=.05\n",
+    "successes = np.array([A_event_users.loc[2, 'nunique'], B_event_users.loc[2, 'nunique']])\n",
+    "trials = np.array([A_event_users.loc[0, 'nunique'], B_event_users.loc[0, 'nunique']])\n",
+    "p1 = successes[0]/trials[0] \n",
+    "p2 = successes[1]/trials[1] \n",
+    "p_combined = (successes[0] + successes[1]) / (trials[0] + trials[1])\n",
+    "difference = p1 - p2 "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 56,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "p-значение:  0.10281767567786759\n",
+      "Не получилось отвергнуть нулевую гипотезу, нет оснований считать доли разными\n"
+     ]
+    }
+   ],
+   "source": [
+    "z_value = difference / math.sqrt(p_combined * (1 - p_combined) * (1/trials[0] + 1/trials[1]))\n",
+    "\n",
+    "distr = st.norm(0, 1)\n",
+    "p_value = (1 - distr.cdf(abs(z_value))) * 2\n",
+    "\n",
+    "print('p-значение: ', p_value)\n",
+    "\n",
+    "if p_value < alpha:\n",
+    "    print(\"Отвергаем нулевую гипотезу: между долями есть значимая разница\")\n",
+    "else:\n",
+    "    print(\"Не получилось отвергнуть нулевую гипотезу, нет оснований считать доли разными\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Разница между конверсиями в группе А 31% и в группе В 28% не оказалась значимой. p-значение оказалось чуть больше 10%."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Конверсия в просмотр карточек товаров**"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Нулевая гипотеза*: Конверсия в группе A равна конверсии в группе B\n",
+    "\n",
+    "*Альтернативная гипотеза*: Конверсия в группе A не равна конверсии в группе B"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 57,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "alpha=.05\n",
+    "successes = np.array([A_event_users.loc[1, 'nunique'], B_event_users.loc[1, 'nunique']])\n",
+    "trials = np.array([A_event_users.loc[0, 'nunique'], B_event_users.loc[0, 'nunique']])\n",
+    "p1 = successes[0]/trials[0] \n",
+    "p2 = successes[1]/trials[1] \n",
+    "p_combined = (successes[0] + successes[1]) / (trials[0] + trials[1])\n",
+    "difference = p1 - p2 "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 58,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "p-значение:  1.5371909704686715e-05\n",
+      "Отвергаем нулевую гипотезу: между долями есть значимая разница\n"
+     ]
+    }
+   ],
+   "source": [
+    "z_value = difference / math.sqrt(p_combined * (1 - p_combined) * (1/trials[0] + 1/trials[1]))\n",
+    "\n",
+    "distr = st.norm(0, 1)\n",
+    "p_value = (1 - distr.cdf(abs(z_value))) * 2\n",
+    "\n",
+    "print('p-значение: ', p_value)\n",
+    "\n",
+    "if p_value < alpha:\n",
+    "    print(\"Отвергаем нулевую гипотезу: между долями есть значимая разница\")\n",
+    "else:\n",
+    "    print(\"Не получилось отвергнуть нулевую гипотезу, нет оснований считать доли разными\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Между долями есть значимая разница в группе А 65% и в группе В 56%, то есть это разница отрицательная и тоже не дает нам необходимых результатов."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "**Конверсия в просмотр корзины**"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Нулевая гипотеза*: Конверсия в группе A равна конверсии в группе B\n",
+    "\n",
+    "*Альтернативная гипотеза*: Конверсия в группе A не равна конверсии в группе B"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 59,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "alpha=.05\n",
+    "successes = np.array([A_event_users.loc[3, 'nunique'], B_event_users.loc[3, 'nunique']])\n",
+    "trials = np.array([A_event_users.loc[0, 'nunique'], B_event_users.loc[0, 'nunique']])\n",
+    "p1 = successes[0]/trials[0] \n",
+    "p2 = successes[1]/trials[1] \n",
+    "p_combined = (successes[0] + successes[1]) / (trials[0] + trials[1])\n",
+    "difference = p1 - p2 "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 60,
+   "metadata": {
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "p-значение:  0.1766337419130104\n",
+      "Не получилось отвергнуть нулевую гипотезу, нет оснований считать доли разными\n"
+     ]
+    }
+   ],
+   "source": [
+    "z_value = difference / math.sqrt(p_combined * (1 - p_combined) * (1/trials[0] + 1/trials[1]))\n",
+    "\n",
+    "distr = st.norm(0, 1)\n",
+    "p_value = (1 - distr.cdf(abs(z_value))) * 2\n",
+    "\n",
+    "print('p-значение: ', p_value)\n",
+    "\n",
+    "if p_value < alpha:\n",
+    "    print(\"Отвергаем нулевую гипотезу: между долями есть значимая разница\")\n",
+    "else:\n",
+    "    print(\"Не получилось отвергнуть нулевую гипотезу, нет оснований считать доли разными\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Разница между конверсиями в группе А 31% и в группе В 28% не оказалась значимой. p-значение оказалось чуть больше 17%."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Общий вывод"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "1) даты маркетинговых мероприятий пересекаются с датами проведения теста,\n",
+    "\n",
+    "2) пользователи теста recommender_system_test и теста interface_eu_test, пришлось их удалить, но после этого пользовталей стало 5099 из нужных по техзаданию 6000,\n",
+    "\n",
+    "3) конверсия в группе А меньше конверсии группы В на 1-2%, а по техзаданию должно быть 10%,\n",
+    "\n",
+    "4) количество пользователей из Европы всего 6,1%, а по техзаданию должно быть 15%\n",
+    "\n",
+    "5) количество событий на пользователя в группе А больше группы В,\n",
+    "\n",
+    "6) число событий по дням распределено неравномерно у А сначала небольшое количество, затем возрастает - достигает пика 21.12 и потом снижается, в группе В сразу большое количество затем уменьшается, потом опять возрастает и достигает пика также 21.12 и резко уменьшается,\n",
+    "\n",
+    "7) в проверке гипотез в конверсии просмотра корзины и покупки не получилось отвергнуть нулевую гипотезу -> нет оснований считать конверсии в группах А и В разными, а в просмотр карточек товаров показало значимую разницу долей групп А и В, хотя это разница в пользу группы А.\n",
+    "\n",
+    "**Из всего выше перечисленного можно сделать вывод, что А/В тест неудачен**"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.8.5"
+  },
+  "toc": {
+   "base_numbering": 1,
+   "nav_menu": {},
+   "number_sections": true,
+   "sideBar": true,
+   "skip_h1_title": true,
+   "title_cell": "Table of Contents",
+   "title_sidebar": "Contents",
+   "toc_cell": false,
+   "toc_position": {
+    "height": "calc(100% - 180px)",
+    "left": "10px",
+    "top": "150px",
+    "width": "248.594px"
+   },
+   "toc_section_display": true,
+   "toc_window_display": false
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
